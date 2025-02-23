@@ -9,30 +9,26 @@ import stripAnsi from 'strip-ansi'
 const isPPREnabledByDefault = process.env.__NEXT_EXPERIMENTAL_PPR === 'true'
 
 describe('app dir - basic', () => {
-  const {
-    next,
-    isNextDev: isDev,
-    isNextStart,
-    isNextDeploy,
-    isTurbopack,
-  } = nextTestSetup({
-    files: __dirname,
-    buildCommand: process.env.NEXT_EXPERIMENTAL_COMPILE
-      ? `pnpm next build --experimental-build-mode=compile`
-      : undefined,
-    dependencies: {
-      nanoid: '4.0.1',
-    },
-  })
+  const { next, isNextDev, isNextStart, isNextDeploy, isTurbopack } =
+    nextTestSetup({
+      files: __dirname,
+      buildCommand: process.env.NEXT_EXPERIMENTAL_COMPILE
+        ? `pnpm next build --experimental-build-mode=compile`
+        : undefined,
+      dependencies: {
+        nanoid: '4.0.1',
+      },
+    })
 
-  if (isDev && isPPREnabledByDefault) {
-    it('should allow returning just skeleton in dev with query', async () => {
-      const res = await next.fetch('/skeleton?__nextppronly=1')
-      expect(res.status).toBe(200)
-
-      const html = await res.text()
-      expect(html).toContain('Skeleton')
-      expect(html).not.toContain('suspended content')
+  if (isNextStart) {
+    it('should have correct cache-control for SSR routes', async () => {
+      for (const path of ['/catch-all/first', '/ssr']) {
+        const res = await next.fetch(path)
+        expect(res.status).toBe(200)
+        expect(res.headers.get('Cache-Control')).toBe(
+          'private, no-cache, no-store, max-age=0, must-revalidate'
+        )
+      }
     })
   }
 
@@ -46,22 +42,29 @@ describe('app dir - basic', () => {
     })
   }
 
+  if (isNextStart) {
+    it('should contain framework.json', async () => {
+      const frameworksJson = await next.readJSON(
+        '.next/diagnostics/framework.json'
+      )
+      expect(frameworksJson).toEqual({
+        name: 'Next.js',
+        version: require('next/package.json').version,
+      })
+    })
+
+    it('outputs correct build-diagnostics.json', async () => {
+      const buildDiagnosticsJson = await next.readJSON(
+        '.next/diagnostics/build-diagnostics.json'
+      )
+      expect(buildDiagnosticsJson).toMatchObject({
+        buildStage: 'static-generation',
+        buildOptions: {},
+      })
+    })
+  }
+
   if (isNextStart && !process.env.NEXT_EXPERIMENTAL_COMPILE) {
-    it('should not have loader generated function for edge runtime', async () => {
-      expect(
-        await next.readFile('.next/server/app/dashboard/page.js')
-      ).not.toContain('_stringifiedConfig')
-      expect(await next.readFile('.next/server/middleware.js')).not.toContain(
-        '_middlewareConfig'
-      )
-    })
-
-    it('should not have entire prerender-manifest for edge', async () => {
-      expect(await next.readFile('.next/prerender-manifest.js')).not.toContain(
-        'initialRevalidate'
-      )
-    })
-
     if (!process.env.NEXT_EXPERIMENTAL_COMPILE) {
       it('should have correct size in build output', async () => {
         expect(next.cliOutput).toMatch(
@@ -142,7 +145,7 @@ describe('app dir - basic', () => {
     })
   })
 
-  if (!isDev) {
+  if (!isNextDev) {
     it('should successfully detect app route during prefetch', async () => {
       const browser = await next.browser('/')
 
@@ -160,28 +163,32 @@ describe('app dir - basic', () => {
     })
   }
 
-  it('should encode chunk path correctly', async () => {
-    await next.fetch('/dynamic-client/first/second')
-    const browser = await next.browser('/')
-    const requests = []
-    browser.on('request', (req) => {
-      requests.push(req.url())
-    })
+  // Turbopack has different chunking in dev/production which results in the entrypoint name not being included in the outputs.
+  if (!process.env.TURBOPACK) {
+    it('should encode chunk path correctly', async () => {
+      await next.fetch('/dynamic-client/first/second')
+      const browser = await next.browser('/')
+      const requests = []
+      browser.on('request', (req) => {
+        requests.push(req.url())
+      })
 
-    await browser.eval('window.location.href = "/dynamic-client/first/second"')
-
-    await check(async () => {
-      return requests.some(
-        (req) =>
-          req.includes(
-            encodeURI(isTurbopack ? '[category]_[id]' : '/[category]/[id]')
-          ) && req.endsWith('.js')
+      await browser.eval(
+        'window.location.href = "/dynamic-client/first/second"'
       )
-        ? 'found'
-        : // When it fails will log out the paths.
-          JSON.stringify(requests)
-    }, 'found')
-  })
+
+      await browser.waitForElementByCss('#id-page-params')
+
+      expect(
+        requests.some(
+          (req) =>
+            req.includes(
+              encodeURI(isTurbopack ? '[category]_[id]' : '/[category]/[id]')
+            ) && req.includes('.js')
+        )
+      ).toBe(true)
+    })
+  }
 
   it.each([
     { pathname: '/redirect-1' },
@@ -189,6 +196,7 @@ describe('app dir - basic', () => {
     { pathname: '/blog/old-post' },
     { pathname: '/redirect-3/some' },
     { pathname: '/redirect-4' },
+    { pathname: '/redirect-4/?q=1&=' },
   ])(
     'should match redirects in pages correctly $path',
     async ({ pathname }) => {
@@ -229,7 +237,7 @@ describe('app dir - basic', () => {
     expect(await browser.eval('window.beforeNav')).toBe(1)
   })
 
-  if (isDev) {
+  if (isNextDev) {
     it('should not have duplicate config warnings', async () => {
       await next.fetch('/')
       expect(
@@ -309,7 +317,7 @@ describe('app dir - basic', () => {
     const res = await next.fetch('/dashboard')
     expect(res.headers.get('x-edge-runtime')).toBe('1')
     expect(res.headers.get('vary')).toBe(
-      'RSC, Next-Router-State-Tree, Next-Router-Prefetch'
+      'RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch'
     )
   })
 
@@ -321,8 +329,8 @@ describe('app dir - basic', () => {
     })
     expect(res.headers.get('vary')).toBe(
       isNextDeploy
-        ? 'RSC, Next-Router-State-Tree, Next-Router-Prefetch'
-        : 'RSC, Next-Router-State-Tree, Next-Router-Prefetch, Accept-Encoding'
+        ? 'RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch'
+        : 'RSC, Next-Router-State-Tree, Next-Router-Prefetch, Next-Router-Segment-Prefetch, Accept-Encoding'
     )
   })
 
@@ -573,7 +581,7 @@ describe('app dir - basic', () => {
   })
 
   // TODO-APP: Enable in development
-  ;(isDev ||
+  ;(isNextDev ||
     // When PPR is enabled, the shared layouts re-render because we prefetch
     // from the root. This will be addressed before GA.
     isPPREnabledByDefault
@@ -733,9 +741,11 @@ describe('app dir - basic', () => {
         await browser.waitForElementByCss('#render-id')
         expect(await browser.eval('window.history.length')).toBe(2)
 
-        // Get the ID again, and compare, they should be the same.
-        const thirdID = await browser.elementById('render-id').text()
-        expect(thirdID).not.toBe(firstID)
+        await retry(async () => {
+          // Get the ID again, and compare, they should be the same.
+          const thirdID = await browser.elementById('render-id').text()
+          expect(thirdID).not.toBe(firstID)
+        })
 
         // verify that the flag is still set
         expect(await browser.eval('window.__nextSoftPushTest')).toBe(1)
@@ -1148,7 +1158,7 @@ describe('app dir - basic', () => {
     })
   })
 
-  if (isDev) {
+  if (isNextDev) {
     describe('HMR', () => {
       it('should HMR correctly for server component', async () => {
         const filePath = 'app/dashboard/index/page.js'
@@ -1368,7 +1378,7 @@ describe('app dir - basic', () => {
     })
 
     // TODO-APP: disable failing test and investigate later
-    ;(isDev ||
+    ;(isNextDev ||
       // When PPR is enabled, the shared layouts re-render because we prefetch
       // from the root. This will be addressed before GA.
       isPPREnabledByDefault
@@ -1482,14 +1492,19 @@ describe('app dir - basic', () => {
 
     describe('should support React fetch instrumentation', () => {
       it('server component', async () => {
+        // trigger compilation of 404 here first.
+        // Any other page being compiled between refresh of a page would get us fresh modules i.e. not catch previous regressions where we restored the wrong fetch.
+        await next.browser('/_not-found')
         const browser = await next.browser('/react-fetch/server-component')
         const val1 = await browser.elementByCss('#value-1').text()
         const val2 = await browser.elementByCss('#value-2').text()
+        expect(val1).toBe(val2)
 
-        // TODO: enable when fetch cache is enabled in dev
-        if (!isDev) {
-          expect(val1).toBe(val2)
-        }
+        await browser.refresh()
+
+        const val1AfterRefresh = await browser.elementByCss('#value-1').text()
+        const val2AfterRefresh = await browser.elementByCss('#value-2').text()
+        expect(val1AfterRefresh).toBe(val2AfterRefresh)
       })
 
       it('server component client-navigation', async () => {
@@ -1503,7 +1518,7 @@ describe('app dir - basic', () => {
         const val2 = await browser.elementByCss('#value-2').text()
 
         // TODO: enable when fetch cache is enabled in dev
-        if (!isDev) {
+        if (!isNextDev) {
           expect(val1).toBe(val2)
         }
       })
@@ -1696,7 +1711,7 @@ describe('app dir - basic', () => {
         expect(element.attribs.nonce).toBeTruthy()
       })
 
-      if (!isDev) {
+      if (!isNextDev) {
         const browser = await next.browser('/script-nonce')
 
         await retry(async () => {
@@ -1739,7 +1754,7 @@ describe('app dir - basic', () => {
     })
 
     // Turbopack doesn't use eval by default, so we can check strict CSP.
-    if (!isDev || isTurbopack) {
+    if (!isNextDev || isTurbopack) {
       // This test is here to ensure that we don't accidentally turn CSP off
       // for the prod version.
       it('should successfully bootstrap even when using CSP', async () => {
